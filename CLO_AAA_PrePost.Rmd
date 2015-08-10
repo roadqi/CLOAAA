@@ -5,6 +5,7 @@ date: "08/02/2015"
 output: html_document
 ---
 ## trying Plots
+## one more change
 
 reqPackages <- c("corrplot","caret","e1071","AppliedPredictiveModeling","zoo","xts","quantmod","PerformanceAnalytics","timeDate","reshape2","leaps","tree","rpart","randomForest","gbm","earth","ipred","ggplot2")
 
