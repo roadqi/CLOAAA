@@ -1,0 +1,629 @@
+---
+title: _"CLO Spreads"_
+author: "Quantmod Consulting"
+date: "08/02/2015"
+output: html_document
+---
+## trying Plots
+
+reqPackages <- c("corrplot","caret","e1071","AppliedPredictiveModeling","zoo","xts","quantmod","PerformanceAnalytics","timeDate","reshape2","leaps","tree","rpart","randomForest","gbm","earth","ipred","ggplot2")
+
+for (l in 1:length(reqPackages)) {
+  if(reqPackages[l] %in% rownames(installed.packages()) == FALSE)
+    {
+    print(paste('Installing Missing Package: ',reqPackages[l],sep=''))
+    install.packages(reqPackages[l],dep = TRUE, repos = "https://urldefense.proofpoint.com/v2/url?u=http-3A__cran.r-2Dproject.org&d=BQIGAg&c=kRG5nTkfHQDBBUG6z7u8nA&r=XUdtJRsLvvNRjcfUnpBp097wSGZqIC5ZhkqXJOJ9zVI&m=dPLQgCO072eQEF05kIyjBGzhIToOzqHsnUlS6d8yQR0&s=T9-Fg1qg6Mj443dF8HSnwiCMz1dXeEIwldUXoznxrxc&e= ")
+    }
+}
+
+### Load all the required packages.
+
+{r, message = FALSE}
+lapply(reqPackages, require, character.only = TRUE)
+
+
+### If any of these packages are still missing, install them as follows
+{r,eval = FALSE}
+install.packages("<package name>",dep = TRUE,repos = "https://urldefense.proofpoint.com/v2/url?u=http-3A__cran.r-2Dproject.org&d=BQIGAg&c=kRG5nTkfHQDBBUG6z7u8nA&r=XUdtJRsLvvNRjcfUnpBp097wSGZqIC5ZhkqXJOJ9zVI&m=dPLQgCO072eQEF05kIyjBGzhIToOzqHsnUlS6d8yQR0&s=T9-Fg1qg6Mj443dF8HSnwiCMz1dXeEIwldUXoznxrxc&e= ")
+
+  
+### Initialize the paramaters
+
+extreme_sd <- 5
+
+  
+### Set the working directory and load the data file containing monthly & imputed Qtrly to monthly predictors
+
+#setwd("/home/vulcan/Work-UnionBank")
+setwd("/Users/rahulchoudhry/Documents/FinModeling")
+m_predictors <- read.csv("./Data/MonthlyTransformedData.csv",header=TRUE)
+m_predictors$Date <- as.Date(m_predictors$Date, "%Y-%m-%d")
+q2m_predictors <- read.csv("./Data/Q2MInperpolated_GDP_HPI.csv",header=TRUE)
+q2m_predictors$Date <- as.Date(q2m_predictors$Date, "%Y-%m-%d")
+all_predictors <- merge(m_predictors,q2m_predictors)
+#write.table(all_predictors,file = "./Data/AllMonthlyPredictors.csv", sep = ",",row.names = FALSE,col.names = TRUE)
+
+  
+### Create a field BBBSpread and drop the field BBBYield  
+
+all_predictors$BBBSpread <- all_predictors$BBBYld - all_predictors$Tsy_10yr
+all_predictors <- all_predictors[,-(which(names(all_predictors) == "BBBYld"))]
+
+  
+### Plot the histograms of all the predictors to look for data distributions
+{r, message=FALSE, warning=FALSE}
+for (k in 2:ncol(all_predictors)){
+  print(qplot(all_predictors[,k],data = all_predictors[,2:ncol(all_predictors)], geom = "histogram", xlab = names(all_predictors)[k]))
+}
+
+### Calculate skewness of all the fields
+
+skewValues <- apply(all_predictors[,-1],2,skewness)
+skewValues
+
+  
+### Apply pre-processing transformations for center/scaling
+
+trans.predictors <- preProcess(all_predictors[,-1],method = c("center","scale"))
+transformedPredictors <- predict(trans.predictors,all_predictors[,-1])
+apply(transformedPredictors,2,mean)
+apply(transformedPredictors,2,sd)
+transformedPredictors <- cbind(all_predictors$Date,transformedPredictors)
+names(transformedPredictors)[1] <- "Date"
+
+  
+
+### Prepare the response/dependent variable. Data comes in as Weekly numbers. Filter the series starting point to match that of predictors
+
+resp <- read.csv("./Data/CLO_AAA.csv",header=TRUE)
+resp$Date <- as.Date(resp$Date,"%m/%d/%y")
+resp <- resp[order(resp$Date),]
+resp <- resp[resp$Date >= min(all_predictors$Date),]
+names(resp)
+
+
+  
+### Select the columns for Date & AUTO Fixed AAA 1 yr/2yr/3yr SWAPSPRD & convert to zoo object so we can use time series based imputations & transformations
+
+
+AAA3YR <- resp[,c(1,2)]
+z_aaa3 <- zoo(AAA3YR[,-1],AAA3YR[,1])
+which(is.na(z_aaa3))
+
+
+### Missing values (NAs) are replaced by linear interpolation via function _na.approx_ 
+
+
+if (length(which(is.na(z_aaa3))) > 0){
+  print('Using na.approx to impute the following rows\n')
+  print(which(is.na(z_aaa3)))
+  z_aaa3 <- na.approx(z_aaa3)
+}
+
+
+### Use the function _to.monthly_ to convert the quarterly series to monthly series. 
+(Package _timeDate_.Type _?to.monthly_ in the console to launch help)
+Monthly series consists of 4 columns corresponding to MonthOpen, MonthHigh, MonthLow, MonthClose
+We will be selecting the 4th column which contains the Month Closing value
+  
+
+
+z_aaa3_Mnthly <- to.monthly(z_aaa3)
+head(z_aaa3_Mnthly,3)
+z_aaa3_Mnthly <- z_aaa3_Mnthly[,4]
+
+    
+### Convert from zoo to data.frame object and then create the periodic returns 
+
+
+df.z_aaa3_Mnthly <-as.data.frame(z_aaa3_Mnthly)
+
+  
+  
+### Create a vector Data with End of Month dates and bind the date column with the response values.
+
+Date <- as.Date(paste("01",row.names(df.z_aaa3_Mnthly),sep=" "),"%d %B %Y")-1
+LastDate <- seq(max(Date),by="month",length.out =2)
+Date <- c(Date[-1],LastDate[2])
+
+df.z_aaa3_Mnthly <- cbind(as.data.frame(Date),df.z_aaa3_Mnthly)
+names(df.z_aaa3_Mnthly)[1] <- "Date"
+head(df.z_aaa3_Mnthly,3)
+
+  
+### We merge the predictors in the dataframe _all_predictors_ with the response data frame/s
+
+merge_RespPred_aaa3.df <- merge(df.z_aaa3_Mnthly,transformedPredictors)
+
+  
+### Set index/row names as Date column,  set column name for the response variable as _Response_ & drop _Date_ column
+
+row.names(merge_RespPred_aaa3.df) <- merge_RespPred_aaa3.df$Date
+merge_RespPred_aaa3.df <- merge_RespPred_aaa3.df[,-1]
+names(merge_RespPred_aaa3.df)[1]<-"Response"
+names(merge_RespPred_aaa3.df)
+
+ 
+### Check for pair-wise correlations between the response + predictors and plot the correlations matrix
+
+correlations_aaa3 <- cor(merge_RespPred_aaa3.df)
+correlations_aaa3[1,]
+corrplot(correlations_aaa3,order="hclust", title = "Correlation Heat Plot: AAA 3yr & Macro Vars")
+
+
+  
+### Return Distribution
+{r,warning=FALSE,message=FALSE}
+qplot(Response,data = merge_RespPred_aaa3.df, geom = "histogram",main = "Distribution of CLO-AAA3yr")
+
+  
+### Plot the BW plots for all fields to look for distributions and outliers (Y Axis scaled to log10)
+
+ggplot(melt(merge_RespPred_aaa3.df), aes(variable, value)) + geom_boxplot() +  scale_y_log10() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ggtitle("Response = CLO 3Yr SWAPSPRD") + ylab ("Value - Scaled Log10")
+
+
+
+RespPred.df <- merge_RespPred_aaa3.df
+
+### Check for the records with those outlier values 
+
+print('The record with Max value of response is')
+RespPred.df[which(RespPred.df$Response == max(RespPred.df$Response)),]
+print('The record with Min value of response is')
+RespPred.df[which(RespPred.df$Response == min(RespPred.df$Response)),]
+print(paste('The records where response is greater than the mean response by',paste(extreme_sd,'standard deviations',sep=' '),sep=' '))
+RespPred.df[which(RespPred.df$Response >= mean(RespPred.df$Response) + extreme_sd*sd(RespPred.df$Response)),]
+print(paste('The records where response is lesser than the mean response by',paste(extreme_sd,'standard deviations',sep=' '),sep=' '))
+RespPred.df[which(RespPred.df$Response <= mean(RespPred.df$Response) - extreme_sd*sd(RespPred.df$Response)),]
+
+    
+### Plot distribution of _Response_ again
+
+qplot(Response,data = RespPred.df, geom = "histogram")
+
+    
+### Split this dataset 
+
+set.seed(33833)
+
+cleanTrain <- rbind(RespPred.df[row.names(RespPred.df) >= '2006-01-01' & row.names(RespPred.df) < '2008-01-01',],RespPred.df[row.names(RespPred.df) >= '2011-07-01',])
+
+cleanTest  <- RespPred.df[row.names(RespPred.df) >= '2008-01-01' & row.names(RespPred.df) < '2011-07-01',]
+
+
+  
+### Each model will be using repeated 10 fold cross-validation and is specified with 
+_trainControl_ function
+
+controlObject <- trainControl(method = "repeatedcv", repeats = 5, number = 10)
+
+  
+  
+## Tree Based Models
+  
+### Random Forest Model
+
+set.seed(8888)
+mtry <- floor((ncol(cleanTrain)-1)/3)
+rfModelTune <- train(Response ~ .,data = cleanTrain, method = "rf", tuneLength = 10, ntrees = 1000,  importance = TRUE, trControl = controlObject)
+rfModelTune
+rfModelResults <- rfModelTune[[4]]
+
+  
+  
+
+bestMtry <- rfModelResults[rfModelResults$RMSE == min(rfModelResults$RMSE),1]
+print(paste('The value of mtry that results in lowest RMSE:',bestMtry,sep = ''))
+p <- ggplot(rfModelResults, aes(x=mtry, y=RMSE))
+print(p + geom_point())
+
+  
+  
+### Checking if we can find an optimal value of mtry (lesser than bestMtry) whose RMSE  is within 1 SE of lowest RMSE 
+ 
+rfModelResults <- rfModelResults[,c(1,2)]
+opt_rfModelResults <- data.frame(ncomp = rfModelResults$mtry,
+                   RMSE = rfModelResults$RMSE, RMSESD = sd(rfModelResults$RMSE)/sqrt(nrow(rfModelResults)))
+optMtry <- oneSE(opt_rfModelResults, "RMSE", maximize = FALSE, num = 12) 
+
+  
+  
+rfModel_best <- randomForest(Response ~ .,data = cleanTrain,ntrees = 1000, mtry = bestMtry, importance = TRUE)
+rfModel_best
+importance(rfModel_best)
+varImpPlot(rfModel_best)
+
+  
+%Inc MSE is based upon the mean decrease of accuracy in predictions on the out of bag samples
+when a given variable is excluded from the model. 
+
+IncNodePurity is a measure of the total decrease in node impurity that results from splits over that
+variable, averaged over all trees.
+In the case of regression trees, the node impurity is measured by the training RSS
+    
+### Bagging
+
+mtryb <- ncol(cleanTrain)-1
+set.seed(8888)
+bagModel <- train(Response ~ .,data = cleanTrain, method = "treebag", trControl = controlObject)
+#bagModel <- randomForest(Response ~ .,data = cleanTrain,ntrees = 1000, mtry = mtryb, importance = TRUE)
+bagModel
+
+  
+### Decision Trees
+
+set.seed(8888)
+dTreeModelTune <- train(Response ~ .,data = cleanTrain, method = "rpart", tuneLength = 50, trControl = controlObject)
+dTree <- rpart(Response~.,cleanTrain)
+summary(dTree)
+
+  
+  
+
+plot(dTree)
+text(dTree,pretty = 0)
+
+  
+    
+
+dTree
+
+  
+ 
+### Boosting model with 5 fold Cross Validation. Create model, inspect model summary and plot partial dependence plots for 3 most important variables.
+  
+GBM function call as used below has 4 major input parameters that a user has to input:
+1) Number of Trees
+2) Interaction depth (aka depth of trees)
+3) Shrinkage
+4) Number of minimum observations per node
+  
+_These plots illustrate the marginal effect of the selected variables on the response after integrating out the other variables._
+
+set.seed(8888)
+boostModel <- gbm(Response ~ .,data = cleanTrain, distribution = "gaussian", n.trees = 1100, interaction.depth=5, shrinkage = 0.01, cv.folds = 10, n.minobsinnode = 5)
+boostModel
+sumBoost <-  summary(boostModel)
+
+  
+      
+
+sumBoost
+par(mfrow = c(1,3))
+top3 <- as.character(print(head(sumBoost,3))[,1])
+plot(boostModel, i=top3[1])
+plot(boostModel, i=top3[2])
+plot(boostModel, i=top3[3])
+
+  
+Estimate the optimal number of boosting iterations for a gbm object and plot squared error loss  
+
+
+par(mfrow = c(1,1))
+best.iter <- gbm.perf(boostModel,method="cv", oobag.curve = FALSE)
+print(best.iter)
+
+  
+Use _train_ function from _caret_ package to tune over the different input parameters. The following code block has been disabled after the optimal tuning parameters were obtained and used in the gbm model _boostModel_ created above.
+
+
+gbmGrid <- expand.grid(.interaction.depth = seq(1,5,by=1),
+                       .n.trees = seq(100,4000, by = 100),
+                       .shrinkage = c(0.01,0.033,0.066,0.1),
+                       .n.minobsinnode = c(5,10))
+
+#set.seed(8888)
+#gbmTune <- train(Response ~ .,data = cleanTrain,method = "gbm", tuneGrid = gbmGrid,verbose = FALSE, trControl = controlObject)
+#gbmTune
+#boostModelResults <- gbmTune[[4]]
+#bestBoost <- boostModelResults[boostModelResults$RMSE == min(boostModelResults$RMSE),]
+#bestBoost
+#boostOptTree <- boostModelResults[boostModelResults$shrinkage == bestBoost$shrinkage & boostModelResults$interaction.depth == bestBoost$interaction.depth & boostModelResults$n.minobsinnode == bestBoost$n.minobsinnode, c(4,5)]
+#p1 <- ggplot(boostOptTree, aes(x=n.trees, y=RMSE))
+#print(p1 + geom_point())
+#opt_boostModelResults <- data.frame(ncomp = boostOptTree$n.trees,
+#                   RMSE = boostOptTree$RMSE, RMSESD = sd(boostOptTree$RMSE)/sqrt(nrow(boostOptTree)))
+#optTreeBoost <- oneSE(opt_rfModelResults, "RMSE", maximize = FALSE,num = 1000) 
+
+  
+For CLO AAA, the final values of the parameters after evaluating for minimum RMSE over the entire tuning grid  as follows 
+
+_RMSE was used to select the optimal model using  the smallest value.The final values used for the model were n.trees = 1100, interaction.depth = 5, shrinkage = 0.01 and n.minobsinnode = 5._  
+
+  
+  
+## Linear Regression based models
+  
+### Scatterplots to check for linearity 
+
+
+par(mfrow = c(ncol(cleanTrain)-1,1))
+for (z in 2:ncol(cleanTrain)){
+plotcmd <- paste('print(',paste('ggplot(',paste(paste('cleanTrain, aes(x=', names(cleanTrain)[z],sep = ' '),'y = Response)) + geom_point(shape = 1) + geom_smooth(method=lm))',sep = ','),sep=''),sep = '')
+eval(parse(text = plotcmd))
+}
+par(mfrow = c(1,1))
+
+  
+  
+### Log Transform the Response & Predictors
+
+logCleanTrain <- log(cleanTrain + 10)
+
+  
+  
+### Best Subset Model
+
+# Uncomment the line below in case you want to remove VIX from the model
+#cleanTrain <- cleanTrain[,-(which(names(cleanTrain) == "VIX"))]
+regfit.full=regsubsets(Response~0+.,logCleanTrain,nvmax = ncol(logCleanTrain)-1)
+reg.summary <- summary(regfit.full)
+reg.summary$which
+reg.summary$rsq
+reg.summary$adjr2
+which.max(reg.summary$adjr2)
+par(mfrow=c(2,2))
+plot( reg.summary$rss, xlab ="Number of Variables ", ylab ="RSS" ,type ="l")
+plot (reg.summary$adjr2,xlab ="Number of Variables ",ylab ="Adjusted RSq", type ="l")
+points(which.max(reg.summary$adjr2),reg.summary$adjr2[which.max(reg.summary$adjr2)],col="red",cex =2,pch=20)
+plot(reg.summary$cp , xlab ="Number of Variables" , ylab ="Cp" , type = "l")
+which.min(reg.summary$cp)
+points(which.min(reg.summary$cp),reg.summary$cp[which.min(reg.summary$cp)],col="red",cex =2,pch=20)
+which.min(reg.summary$bic)
+plot(reg.summary$bic , xlab ="Number of Variables" , ylab ="BIC" , type = "l")
+points(which.min(reg.summary$bic),reg.summary$bic[which.min(reg.summary$bic)],col="red",cex =2,pch=20)
+
+  
+*In the plots created above, we are looking at the value of p (# of predictors)  where the value of Mallow's Cp & BIC is lowest and Adjusted R2 is highest. However for the purposes of building parsimonious models that achieve a desired level of explanation/predictive power, we might choose lesser number of variables than what is predicted above. This decision is entirely subjective and based on the business goal and the tolerance for error.*
+
+### Coefficient Values for the  Best Subset Model with minimum Cp
+
+coef(regfit.full,which.min(reg.summary$cp))
+
+
+### Coefficient Values for the  Best Subset Model with minimum BIC
+
+coef(regfit.full,which.min(reg.summary$bic))
+
+
+### Coefficient Values for the  Best Subset Model with maximum AdjR^2
+
+coef(regfit.full,which.max(reg.summary$adjr2))
+
+  
+*Both Cp and BIC have strong underlying theoretical backing as mechanisms for indirectly estimating test error by making adjustment to training error. This is done to account for the bias due to overfitting.*
+  
+### Forward Stepwise Regression Model
+
+regfit.fwd=regsubsets(Response~0+.,logCleanTrain,method="forward",nvmax = ncol(logCleanTrain)-1)
+reg.fwd.summary <- summary(regfit.fwd)
+reg.fwd.summary$which
+reg.fwd.summary$rsq
+reg.fwd.summary$adjr2
+which.max(reg.fwd.summary$adjr2)
+
+  
+### Use cross validation as an aid to choose among models of different sizes. Here we will be performing best subset selection for each of the k folds
+
+
+k <- 5
+set.seed(1234)
+npred <- ncol(logCleanTrain)-1
+folds = sample(1:k,nrow(logCleanTrain),replace = TRUE)
+cv.errors <- matrix(NA,k,npred,dimnames=list(NULL, paste(1:npred)))
+
+  
+There is currently no predict function defined on the objects of class _regsubsets_. We will define our own predict function
+
+predict.regsubsets=function(object,newdata,id,...){
+  form=as.formula(object$call[[2]])
+  mat=model.matrix(form,newdata)
+  coefi=coef(object,id=id)
+  xvars=names(coefi)
+  mat[,xvars]%*%coefi
+  }
+
+  
+  
+for(j in 1:k){
+  best.fit=regsubsets(Response~.,data=logCleanTrain[folds!=j,],nvmax=npred)
+  for(i in 1:npred){
+    pred=predict(best.fit,logCleanTrain[folds==j,],id=i)
+    pred <- exp(pred) -10
+    cv.errors[j,i] = sqrt(mean((cleanTrain$Response[folds==j]-pred)^2))
+    }
+  }
+
+mean.cv.errors=apply(cv.errors,2,mean)
+mean.cv.errors
+par(mfrow=c(1,1))
+plot(mean.cv.errors,type='b')
+
+  
+*We inspect the plot above and choose the simplest model that is within 1 SE (Standard Error) of the minimum MSE*
+
+testResults <- data.frame(ncomp = 1:(ncol(logCleanTrain)-1),
+                   RMSE = mean.cv.errors, RMSESD = sd(mean.cv.errors)/(ncol(logCleanTrain)-1)^.5 )
+
+N <- oneSE(testResults, "RMSE", maximize = FALSE, num = 10)
+paste('The optimal $ of predictors is:',N,sep='')
+
+  
+### Finally we perform best subset selection on the entire training dataset and choose the number of variables from the above set which result in simplest model as decribed in the above set.  
+
+regfit.best=regsubsets(Response~0+.,logCleanTrain,nvmax = ncol(logCleanTrain)-1)
+coef(regfit.best,N)
+
+  
+### Building a Linear Model using _lm()_  & _train_ function using the predictors obtained above
+
+impPredictors <- row.names(as.data.frame(coef(regfit.best,N)))[-1]
+impPredictors <- c("Response",impPredictors)
+
+# Linear Regression with repeated cross-validation
+linearReg <- train(Response ~ ., data = logCleanTrain[,names(logCleanTrain) %in% impPredictors], method = "lm", trControl = controlObject)
+linearReg
+
+# Linear Regession on Training sample
+lm.fit <- lm(Response ~ ., data = logCleanTrain[,names(logCleanTrain) %in% impPredictors])
+lm.fit
+summary(lm.fit)
+
+par(mfrow=c(2,2))
+plot(lm.fit)
+par(mfrow=c(1,1))
+
+
+### Multivariate Adaptive Regression Splines (MARS)
+  
+MARS uses surrogate features instead of original predictors. It creates two contrasted versions of a predictor to enter the model. The natures of the MARS features breaks the predictors ito two groups and models linear relationship between the predictor and the outcome in each group. It finds a cut point for each predictor, two new features are "hinge" or "hockey stick" functions of the original. The "left hand" feature has values of 0 greater than the cut point while the second feature/"right hand" feature is 0 for values less than the cut point. In effect, this scheme creates a piecewise linear model where each new feature models an isolated portion of the original data.
+  
+A pair of hinge functions is usually written as h(x -a) "right hand feature" and h(a -x) "left hand feature". 
+The first is non-zero when x > a, and second is non-zero when x < a
+
+cleanTrainPreds <- cleanTrain[,-1]
+cleanTrainResp <- cleanTrain[,1]
+marsFit <- earth(cleanTrainPreds,cleanTrainResp)
+marsFit
+summary(marsFit)
+plotmo(marsFit)
+
+  
+  
+Internal GCV estimate that MARS employs evaluates an individual model while the external cross-validation procedure is exposed to variation in the entire model building process including feature selection. Since the GCV  estimate does not reflect the uncertainity from feature selection, this method suffers from selection bias. Generalized Cross Validation R^2 and RMSE values can be more optimistic. 
+  
+In the steps below, we use repeated cross-validation to obtain RMSE and Rsquared estimates
+  
+There are two tuning parameters associated with MARS model : 
+
+a) The degree of features that are added to the model
+  
+b) Number of retained terms
+
+We will now perform cross-validation to find the optimal values of tuning parameters.
+
+
+marsGrid <- expand.grid(.degree = 1:2, .nprune = 2:10)
+set.seed(1000)
+marsTuned <- train(Response ~ .,data = cleanTrain,
+                   method = "earth",
+                   tuneGrid = marsGrid,
+                   trControl = controlObject)
+
+marsTuned
+varImp(marsTuned)
+
+
+
+## Predict with CART based (Decision Tree, Random Forest, & Bagged model) & Linear Regression Best Subset model against the hold-out sample cleanTest
+
+yhat.rf <- predict(rfModel_best,newdata = cleanTest)
+#RMSE of Test Sample
+sqrt(mean((yhat.rf - cleanTest$Response)^2))
+plot(yhat.rf,cleanTest$Response)
+abline(0,1)
+
+yhat.bag <- predict(bagModel,newdata = cleanTest)
+#RMSE of Test Sample
+sqrt(mean((yhat.bag - cleanTest$Response)^2))
+plot(yhat.bag,cleanTest$Response)
+abline(0,1)
+
+yhat.tree <- predict(dTree,newdata = cleanTest)
+#RMSE of Test Sample
+sqrt(mean((yhat.tree - cleanTest$Response)^2))
+plot(yhat.tree,cleanTest$Response)
+abline(0,1)
+
+yhat.boost <- predict(boostModel,newdata = cleanTest)
+#RMSE of Test Sample
+sqrt(mean((yhat.boost - cleanTest$Response)^2))
+plot(yhat.boost,cleanTest$Response)
+abline(0,1)
+
+logCleanTest <- log(cleanTest + 10)
+yhat.bestsubset <- predict(best.fit,logCleanTest,id=N)
+# Transform back to original values
+yhat.bestsubset <- exp(yhat.bestsubset) - 10
+#RMSE of Test Sample
+sqrt(mean((yhat.bestsubset - cleanTest$Response)^2))
+plot(yhat.bestsubset,cleanTest$Response)
+abline(0,1)
+
+cleanTestPreds <- cleanTest[,-1]
+yhat.mars <- predict(marsTuned,cleanTestPreds)
+#RMSE of Test Sample
+sqrt(mean((yhat.mars - cleanTest$Response)^2))
+plot(yhat.mars,cleanTest$Response)
+abline(0,1)
+
+  
+    
+### Data preparation for Time-Series plots. Here we create 3 time series as follows
+
+1. rbind operation to combine the Response variables + Dates from cleanTrain & cleanTest
+2. rbind operation to combine the Response variable from cleanTrain & rfResponse variable from yhat.rf
+3. rbind operation to combine the Response variable from cleanTrain & bagResponse variable from yhat.bag
+  
+We then merge the datasets from above opertations into a single dataframe that we use for plotting
+
+cleanTrain$Date <- row.names(cleanTrain)
+trainResponse <- cleanTrain[,c(ncol(cleanTrain),1)]
+trainResponse$Pt <- 'Estimation'
+
+cleanTest$Date <- row.names(cleanTest)
+testResponse <- cleanTest[,c(ncol(cleanTest),1)]
+testResponse$Pt <- 'Validation'
+
+rfResponse <- as.data.frame(yhat.rf)
+names(rfResponse)[1] <- "Response"
+rfResponse$Date <- row.names(rfResponse)
+rfResponse$Pt <- 'Validation'
+
+bagResponse <- as.data.frame(yhat.bag)
+names(bagResponse)[1] <- "Response"
+bagResponse$Date <- row.names(bagResponse)
+bagResponse$Pt <- 'Validation'
+
+bestsubResponse <- as.data.frame(yhat.bestsubset)
+names(bestsubResponse)[1] <- "Response"
+bestsubResponse$Date <- row.names(bestsubResponse)
+bestsubResponse$Pt <- 'Validation'
+
+orig_data <- rbind(trainResponse,testResponse)
+orig_data$Date <- as.Date(orig_data$Date,"%Y-%m-%d")
+orig_data <- orig_data[order(orig_data$Date),]
+
+est_predrf <- rbind(trainResponse,rfResponse)
+est_predrf$Date <- as.Date(est_predrf$Date,"%Y-%m-%d")
+est_predrf <- est_predrf[order(est_predrf$Date),]
+
+estBag_pred <- rbind(trainResponse,bagResponse)
+estBag_pred$Date <- as.Date(estBag_pred$Date,"%Y-%m-%d")
+estBag_pred <- estBag_pred[order(estBag_pred$Date),]
+
+estBestSubset_pred <- rbind(trainResponse,bestsubResponse)
+estBestSubset_pred$Date <- as.Date(estBestSubset_pred$Date,"%Y-%m-%d")
+estBestSubset_pred <- estBestSubset_pred[order(estBestSubset_pred$Date),]
+
+#compare <- merge(orig_data,est_predrf,by="Date")
+compare <- merge(orig_data,estBestSubset_pred,by="Date")
+
+   
+### Plotting time series of the original Response Data. 
+Points labeled *Estimation* were used for Model estimation & the points labeled *Validation* were used in Validation process
+
+pl1 <- ggplot(compare, aes(x = Date)) + geom_line(aes(y= Response.x), color ="royalblue4")
+pl1 +  geom_point(data=compare, aes(x = Date, y = Response.x, colour = Pt.x)) + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+  
+###  Plotting the time series from Best Subset model
+It consists of original data points used for *Estimation* and the results of prediction algorithm
+
+pl2 <- ggplot(compare, aes(x = Date)) + geom_line(aes(y= Response.y), color ="darkolivegreen4")
+pl2 +  geom_point(data=compare, aes(x = Date, y = Response.y, colour = Pt.x))
+
+pl3 <- ggplot(compare, aes(x = Date)) + geom_line(aes(y= Response.x), color ="royalblue4") + geom_line(aes(y= Response.y), color ="darkolivegreen4")
+pl3
+
+
